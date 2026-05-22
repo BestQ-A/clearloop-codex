@@ -212,6 +212,119 @@ fn clearloop_execute_runs_codex_exec_and_ingests_events() -> Result<()> {
 }
 
 #[test]
+fn clearloop_v0_loop_creates_verified_memory_candidate() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let fake_codex = write_fake_codex_bin(workspace.path())?;
+
+    let mut think = codex_command(codex_home.path())?;
+    think
+        .args([
+            "clearloop",
+            "think",
+            "--id",
+            "tp-demo",
+            "--task",
+            "Fix startup failure",
+            "--target-condition",
+            "server_ready",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .success();
+
+    let mut execute = codex_command(codex_home.path())?;
+    execute
+        .args([
+            "clearloop",
+            "execute",
+            "--id",
+            "run-demo",
+            "--thinking-program",
+            "tp-demo",
+            "--task",
+            "Fix startup failure",
+            "--codex-bin",
+        ])
+        .arg(&fake_codex)
+        .args(["-C"])
+        .arg(workspace.path())
+        .assert()
+        .success();
+
+    let mut verify = codex_command(codex_home.path())?;
+    verify
+        .args([
+            "clearloop",
+            "verify",
+            "--run-id",
+            "run-demo",
+            "--command",
+            "echo verified",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .success();
+
+    let mut remember = codex_command(codex_home.path())?;
+    remember
+        .args([
+            "clearloop",
+            "remember",
+            "--id",
+            "exp-demo",
+            "--run-id",
+            "run-demo",
+            "--problem-model",
+            "pm-startup",
+            "--target-condition",
+            "server_ready",
+            "--claim",
+            "Server readiness depends on an observable ready notification.",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .success()
+        .stdout(contains("Memory gate: candidate only, not promoted"));
+
+    let run_dir = workspace.path().join(".bestqa/agent-runs/run-demo");
+    let manifest = read_json(run_dir.join("manifest.json").as_path())?;
+    assert_eq!(manifest["status"].as_str(), Some("verified"));
+    assert_eq!(manifest["thinking_program_ref"].as_str(), Some("tp-demo"));
+    assert_eq!(
+        manifest["memory_gate"]["decision"].as_str(),
+        Some("candidate_only")
+    );
+    assert!(fs::read_to_string(run_dir.join("result.md"))?.contains("Controlled done"));
+    assert!(fs::read_to_string(run_dir.join("verification.md"))?.contains("Status: passed"));
+    assert!(
+        fs::read_to_string(run_dir.join("decisions.jsonl"))?
+            .contains("Memory candidate created from verified run")
+    );
+
+    let experience = read_json(
+        workspace
+            .path()
+            .join(".bestqa/experiences/exp-demo.json")
+            .as_path(),
+    )?;
+    assert_eq!(experience["source_session"].as_str(), Some("run-demo"));
+    assert_eq!(
+        experience["verification_result"]["passed"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        experience["reusable_update"]["evidence_refs"][0].as_str(),
+        Some(".bestqa/agent-runs/run-demo/verification.md")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn clearloop_verify_updates_manifest_and_verification_artifact() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
