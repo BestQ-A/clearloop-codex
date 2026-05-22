@@ -212,10 +212,14 @@ fn clearloop_execute_runs_codex_exec_and_ingests_events() -> Result<()> {
 }
 
 #[test]
-fn clearloop_v0_loop_creates_verified_memory_candidate() -> Result<()> {
+fn clearloop_v0_loop_promotes_model_reviewed_memory() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
     let fake_codex = write_fake_codex_bin(workspace.path())?;
+    let fake_reviewer = write_fake_review_codex_bin(
+        workspace.path(),
+        r#"{"decision":"accepted","reviewer":"fake-codex/gpt-5.5","note":"verification evidence supports the reusable claim"}"#,
+    )?;
 
     let mut think = codex_command(codex_home.path())?;
     think
@@ -290,19 +294,66 @@ fn clearloop_v0_loop_creates_verified_memory_candidate() -> Result<()> {
         .success()
         .stdout(contains("Memory gate: candidate only, not promoted"));
 
+    let mut review = codex_command(codex_home.path())?;
+    review
+        .args([
+            "clearloop",
+            "review",
+            "--run-id",
+            "run-demo",
+            "--experience-id",
+            "exp-demo",
+            "--model",
+            "gpt-5.5",
+            "--codex-bin",
+        ])
+        .arg(&fake_reviewer)
+        .args(["-C"])
+        .arg(workspace.path())
+        .assert()
+        .success()
+        .stdout(contains("Review decision: accepted"));
+
+    let mut promote = codex_command(codex_home.path())?;
+    promote
+        .args([
+            "clearloop",
+            "promote",
+            "--run-id",
+            "run-demo",
+            "--experience-id",
+            "exp-demo",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .success()
+        .stdout(contains("Run status: promoted_to_memory"));
+
     let run_dir = workspace.path().join(".bestqa/agent-runs/run-demo");
     let manifest = read_json(run_dir.join("manifest.json").as_path())?;
-    assert_eq!(manifest["status"].as_str(), Some("verified"));
+    assert_eq!(manifest["status"].as_str(), Some("promoted_to_memory"));
     assert_eq!(manifest["thinking_program_ref"].as_str(), Some("tp-demo"));
     assert_eq!(
         manifest["memory_gate"]["decision"].as_str(),
-        Some("candidate_only")
+        Some("accepted")
+    );
+    assert_eq!(
+        manifest["memory_gate"]["reviewer"].as_str(),
+        Some("fake-codex/gpt-5.5")
     );
     assert!(fs::read_to_string(run_dir.join("result.md"))?.contains("Controlled done"));
     assert!(fs::read_to_string(run_dir.join("verification.md"))?.contains("Status: passed"));
     assert!(
         fs::read_to_string(run_dir.join("decisions.jsonl"))?
             .contains("Memory candidate created from verified run")
+    );
+    assert!(
+        fs::read_to_string(run_dir.join("decisions.jsonl"))?
+            .contains("Memory candidate accepted by model reviewer")
+    );
+    assert!(
+        fs::read_to_string(run_dir.join("evidence.jsonl"))?.contains("Memory candidate promoted")
     );
 
     let experience = read_json(
@@ -320,6 +371,13 @@ fn clearloop_v0_loop_creates_verified_memory_candidate() -> Result<()> {
         experience["reusable_update"]["evidence_refs"][0].as_str(),
         Some(".bestqa/agent-runs/run-demo/verification.md")
     );
+    let promoted = read_json(
+        workspace
+            .path()
+            .join(".bestqa/memory/promoted/exp-demo.json")
+            .as_path(),
+    )?;
+    assert_eq!(promoted, experience);
 
     Ok(())
 }
@@ -510,6 +568,104 @@ fn clearloop_remember_writes_verified_candidate_experience() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn clearloop_promote_blocks_rejected_model_review() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let fake_reviewer = write_fake_review_codex_bin(
+        workspace.path(),
+        r#"{"decision":"rejected","reviewer":"fake-codex/gpt-5.5","note":"claim is too broad for the evidence"}"#,
+    )?;
+
+    create_run(codex_home.path(), workspace.path(), "run-demo")?;
+    let mut verify = codex_command(codex_home.path())?;
+    verify
+        .args([
+            "clearloop",
+            "verify",
+            "--run-id",
+            "run-demo",
+            "--command",
+            "echo verified",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .success();
+
+    let mut remember = codex_command(codex_home.path())?;
+    remember
+        .args([
+            "clearloop",
+            "remember",
+            "--id",
+            "exp-demo",
+            "--run-id",
+            "run-demo",
+            "--problem-model",
+            "pm-startup",
+            "--target-condition",
+            "server_ready",
+            "--claim",
+            "Server readiness always follows from any ready notification.",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .success();
+
+    let mut review = codex_command(codex_home.path())?;
+    review
+        .args([
+            "clearloop",
+            "review",
+            "--run-id",
+            "run-demo",
+            "--experience-id",
+            "exp-demo",
+            "--model",
+            "gpt-5.5",
+            "--codex-bin",
+        ])
+        .arg(&fake_reviewer)
+        .args(["-C"])
+        .arg(workspace.path())
+        .assert()
+        .success()
+        .stdout(contains("Review decision: rejected"));
+
+    let mut promote = codex_command(codex_home.path())?;
+    promote
+        .args([
+            "clearloop",
+            "promote",
+            "--run-id",
+            "run-demo",
+            "--experience-id",
+            "exp-demo",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .failure()
+        .stderr(contains("promote requires accepted memory review"));
+
+    let run_dir = workspace.path().join(".bestqa/agent-runs/run-demo");
+    let manifest = read_json(run_dir.join("manifest.json").as_path())?;
+    assert_eq!(
+        manifest["memory_gate"]["decision"].as_str(),
+        Some("rejected")
+    );
+    assert!(
+        !workspace
+            .path()
+            .join(".bestqa/memory/promoted/exp-demo.json")
+            .exists()
+    );
+
+    Ok(())
+}
+
 fn read_json(path: &Path) -> Result<Value> {
     let text = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
@@ -555,6 +711,37 @@ fn write_fake_codex_bin(dir: &Path) -> Result<std::path::PathBuf> {
             "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"reason-1\",\"type\":\"reasoning\",\"text\":\"Check observable output.\"}}'",
             "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"cmd-1\",\"type\":\"command_execution\",\"command\":\"cargo test -p codex-clearloop-core\",\"aggregated_output\":\"ok\",\"exit_code\":0,\"status\":\"completed\"}}'",
         ]
+        .join("\n")
+    };
+    fs::write(&path, script)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions)?;
+    }
+
+    Ok(path)
+}
+
+fn write_fake_review_codex_bin(dir: &Path, review_json: &str) -> Result<std::path::PathBuf> {
+    let path = if cfg!(windows) {
+        dir.join("fake-review-codex.cmd")
+    } else {
+        dir.join("fake-review-codex")
+    };
+    let escaped_review = review_json.replace('\\', "\\\\").replace('"', "\\\"");
+    let message = format!(
+        "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"review-1\",\"type\":\"agent_message\",\"text\":\"{escaped_review}\"}}}}"
+    );
+    let script = if cfg!(windows) {
+        ["@echo off".to_string(), format!("echo {message}")].join("\r\n")
+    } else {
+        ["#!/bin/sh".to_string(),
+            format!("printf '%s\\n' '{message}'")]
         .join("\n")
     };
     fs::write(&path, script)?;

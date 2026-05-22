@@ -35,6 +35,8 @@ use codex_clearloop_core::VerificationResult;
 use codex_clearloop_core::final_agent_message_from_codex_exec_jsonl;
 use codex_clearloop_core::map_codex_exec_event_with_source;
 
+use crate::clearloop_memory::PromoteArgs;
+use crate::clearloop_memory::ReviewArgs;
 use crate::clearloop_verify::VerifyArgs;
 
 #[derive(Debug, Parser)]
@@ -63,6 +65,12 @@ pub enum ClearLoopSubcommand {
 
     /// Write a draft reusable experience from an observed run.
     Remember(RememberArgs),
+
+    /// Ask a configured model through Codex to review a memory candidate.
+    Review(ReviewArgs),
+
+    /// Promote an accepted memory candidate into reusable memory.
+    Promote(PromoteArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -266,6 +274,8 @@ impl ClearLoopCli {
             ClearLoopSubcommand::Execute(args) => run_execute(args),
             ClearLoopSubcommand::Verify(args) => crate::clearloop_verify::run_verify(args),
             ClearLoopSubcommand::Remember(args) => run_remember(args),
+            ClearLoopSubcommand::Review(args) => crate::clearloop_memory::run_review(args),
+            ClearLoopSubcommand::Promote(args) => crate::clearloop_memory::run_promote(args),
         }
     }
 }

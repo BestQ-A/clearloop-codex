@@ -58,6 +58,10 @@ impl ClearLoopStore {
         self.bestqa_root().join("experiences")
     }
 
+    pub fn promoted_memory_dir(&self) -> PathBuf {
+        self.bestqa_root().join("memory").join("promoted")
+    }
+
     pub fn agent_runs_dir(&self) -> PathBuf {
         self.bestqa_root().join("agent-runs")
     }
@@ -75,6 +79,12 @@ impl ClearLoopStore {
     pub fn experience_path(&self, id: &str) -> Result<PathBuf> {
         Ok(self
             .experiences_dir()
+            .join(format!("{}.json", safe_id(id)?)))
+    }
+
+    pub fn promoted_memory_path(&self, id: &str) -> Result<PathBuf> {
+        Ok(self
+            .promoted_memory_dir()
             .join(format!("{}.json", safe_id(id)?)))
     }
 
@@ -118,6 +128,12 @@ impl ClearLoopStore {
 
     pub fn load_experience(&self, id: &str) -> Result<Experience> {
         read_json(&self.experience_path(id)?)
+    }
+
+    pub fn save_promoted_memory(&self, experience: &Experience) -> Result<PathBuf> {
+        let path = self.promoted_memory_path(&experience.id)?;
+        write_json(&path, experience)?;
+        Ok(path)
     }
 
     pub fn create_run_ledger(&self, manifest: &RunManifest) -> Result<PathBuf> {
