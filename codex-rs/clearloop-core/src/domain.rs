@@ -201,6 +201,8 @@ pub struct ThinkingProgram {
     pub id: String,
     pub user_task: String,
     pub problem_model_ref: Option<String>,
+    pub retrieval_ref: Option<String>,
+    pub retrieved_memories: Vec<RetrievedMemoryRef>,
     pub reasoning_mode: ReasoningMode,
     pub reasoning_visibility: ReasoningVisibility,
     pub current_conditions: Vec<Condition>,
@@ -216,6 +218,8 @@ impl Default for ThinkingProgram {
             id: String::new(),
             user_task: String::new(),
             problem_model_ref: None,
+            retrieval_ref: None,
+            retrieved_memories: Vec::new(),
             reasoning_mode: ReasoningMode::LlmPrimary,
             reasoning_visibility: ReasoningVisibility::VisibleByDefault,
             current_conditions: Vec::new(),
@@ -224,4 +228,18 @@ impl Default for ThinkingProgram {
             verification_rules: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct RetrievedMemoryRef {
+    pub experience_id: String,
+    pub source_session: String,
+    pub problem_model_ref: String,
+    pub target_condition: String,
+    pub score: usize,
+    pub claim: Option<String>,
+    pub evidence_refs: Vec<String>,
+    pub memory_ref: String,
+    pub retrieval_ref: Option<String>,
 }

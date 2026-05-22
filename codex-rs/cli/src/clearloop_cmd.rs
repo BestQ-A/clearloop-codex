@@ -38,6 +38,7 @@ use codex_clearloop_core::map_codex_exec_event_with_source;
 use crate::clearloop_memory::PromoteArgs;
 use crate::clearloop_memory::ReviewArgs;
 use crate::clearloop_retrieve::RetrieveArgs;
+use crate::clearloop_retrieve::write_promoted_memory_retrieval;
 use crate::clearloop_verify::VerifyArgs;
 
 #[derive(Debug, Parser)]
@@ -106,6 +107,18 @@ pub struct ThinkArgs {
     /// Observed condition to include. Can be repeated.
     #[arg(long = "observed-condition", value_name = "CONDITION")]
     pub observed_conditions: Vec<String>,
+
+    /// Disable promoted memory retrieval during thinking program creation.
+    #[arg(long = "no-memory-retrieval")]
+    pub no_memory_retrieval: bool,
+
+    /// Maximum promoted memories to attach to the thinking program.
+    #[arg(long = "memory-limit", value_name = "N", default_value_t = 5)]
+    pub memory_limit: usize,
+
+    /// Minimum deterministic token-overlap score required for attached memory.
+    #[arg(long = "min-memory-score", value_name = "N", default_value_t = 1)]
+    pub min_memory_score: usize,
 }
 
 #[derive(Debug, Parser)]
@@ -291,6 +304,21 @@ fn run_think(args: ThinkArgs) -> anyhow::Result<()> {
     let id = args
         .id
         .unwrap_or_else(|| generated_id("tp", args.task.as_str()));
+    let retrieval = if args.no_memory_retrieval {
+        None
+    } else {
+        let retrieval_id = format!("{id}-memory");
+        Some(
+            write_promoted_memory_retrieval(
+                &store,
+                retrieval_id.as_str(),
+                args.task.as_str(),
+                args.memory_limit,
+                args.min_memory_score,
+            )
+            .context("failed to retrieve promoted memory for thinking program")?,
+        )
+    };
 
     let target_condition = args
         .target_condition
@@ -301,20 +329,52 @@ fn run_think(args: ThinkArgs) -> anyhow::Result<()> {
         .iter()
         .map(|condition| observed_condition(condition))
         .collect::<Vec<_>>();
+    let retrieved_memories = retrieval
+        .as_ref()
+        .map(|result| result.matches.clone())
+        .unwrap_or_default();
+    let retrieval_ref = retrieval.as_ref().map(|result| {
+        result
+            .path
+            .strip_prefix(&workspace_root)
+            .unwrap_or(result.path.as_path())
+            .display()
+            .to_string()
+    });
+    let problem_model_ref = args.problem_model.or_else(|| {
+        retrieved_memories
+            .first()
+            .map(|memory| memory.problem_model_ref.clone())
+            .filter(|problem_model_ref| !problem_model_ref.is_empty())
+    });
+    let mut planned_actions = vec![Action {
+        id: "define-problem-model".to_string(),
+        description: "Make conditions, relations, constraints, and verification explicit."
+            .to_string(),
+        command_ref: None,
+        expected_effect: "A visible thinking program exists before execution.".to_string(),
+    }];
+    if !retrieved_memories.is_empty() {
+        planned_actions.push(Action {
+            id: "review-retrieved-memory".to_string(),
+            description: "Compare retrieved promoted memory against current task conditions."
+                .to_string(),
+            command_ref: retrieval_ref.clone(),
+            expected_effect:
+                "Known reusable claims and evidence constrain the new plan before execution."
+                    .to_string(),
+        });
+    }
 
     let program = ThinkingProgram {
         id,
         user_task: args.task,
-        problem_model_ref: args.problem_model,
+        problem_model_ref,
+        retrieval_ref,
+        retrieved_memories,
         current_conditions,
         target_condition,
-        planned_actions: vec![Action {
-            id: "define-problem-model".to_string(),
-            description: "Make conditions, relations, constraints, and verification explicit."
-                .to_string(),
-            command_ref: None,
-            expected_effect: "A visible thinking program exists before execution.".to_string(),
-        }],
+        planned_actions,
         ..ThinkingProgram::default()
     };
 
@@ -323,6 +383,10 @@ fn run_think(args: ThinkArgs) -> anyhow::Result<()> {
         .context("failed to write thinking program")?;
     println!("Thinking program written: {}", path.display());
     println!("Thinking program id: {}", program.id);
+    if let Some(retrieval_ref) = program.retrieval_ref.as_ref() {
+        println!("Memory retrieval: {retrieval_ref}");
+        println!("Retrieved memories: {}", program.retrieved_memories.len());
+    }
     Ok(())
 }
 

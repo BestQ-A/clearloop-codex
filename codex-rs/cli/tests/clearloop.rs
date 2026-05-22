@@ -58,6 +58,71 @@ fn clearloop_think_writes_visible_thinking_program() -> Result<()> {
 }
 
 #[test]
+fn clearloop_think_injects_retrieved_memory_context() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    write_promoted_memory(workspace.path())?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args([
+        "clearloop",
+        "think",
+        "--id",
+        "tp-memory",
+        "--task",
+        "server readiness notification failed",
+        "-C",
+    ])
+    .arg(workspace.path())
+    .assert()
+    .success()
+    .stdout(contains("Thinking program written:"))
+    .stdout(contains("Memory retrieval:"))
+    .stdout(contains("Retrieved memories: 1"));
+
+    let program = read_json(
+        workspace
+            .path()
+            .join(".bestqa/thinking-programs/tp-memory.json")
+            .as_path(),
+    )?;
+    assert_eq!(program["problem_model_ref"].as_str(), Some("pm-startup"));
+    assert!(
+        program["retrieval_ref"]
+            .as_str()
+            .is_some_and(|retrieval_ref| retrieval_ref.contains("tp-memory-memory.json"))
+    );
+    assert_eq!(
+        program["retrieved_memories"][0]["experience_id"].as_str(),
+        Some("exp-demo")
+    );
+    assert_eq!(
+        program["retrieved_memories"][0]["claim"].as_str(),
+        Some("Server readiness depends on an observable ready notification.")
+    );
+    assert!(
+        program["planned_actions"]
+            .as_array()
+            .is_some_and(|actions| actions
+                .iter()
+                .any(|action| { action["id"].as_str() == Some("review-retrieved-memory") }))
+    );
+
+    let retrieval = read_json(
+        workspace
+            .path()
+            .join(".bestqa/retrievals/tp-memory-memory.json")
+            .as_path(),
+    )?;
+    assert_eq!(
+        retrieval["matches"][0]["experience_id"].as_str(),
+        Some("exp-demo")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn clearloop_run_writes_observable_run_ledger() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
@@ -386,40 +451,7 @@ fn clearloop_v0_loop_promotes_model_reviewed_memory() -> Result<()> {
 fn clearloop_retrieve_finds_promoted_memory() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
-    let promoted_dir = workspace.path().join(".bestqa/memory/promoted");
-    fs::create_dir_all(&promoted_dir)?;
-    let promoted_memory = serde_json::json!({
-        "schema_version": "codex-clearloop-core.v0",
-        "id": "exp-demo",
-        "source_session": "run-demo",
-        "problem_model_ref": "pm-startup",
-        "initial_conditions": [{
-            "id": "startup_missing_ready_signal",
-            "name": "Startup readiness notification missing",
-            "kind": "observed",
-            "observed_value": "present"
-        }],
-        "target_condition": {
-            "condition_ref": "server_ready",
-            "target_value": "true",
-            "success_signal": "server ready notification"
-        },
-        "verification_result": {
-            "rule_ref": "run-verification",
-            "passed": true,
-            "evidence_ref": ".bestqa/agent-runs/run-demo/verification.md",
-            "summary": "Verified ready notification observed."
-        },
-        "reusable_update": {
-            "claim": "Server readiness depends on an observable ready notification.",
-            "applicability_conditions": ["startup flow has a ready signal"],
-            "evidence_refs": [".bestqa/agent-runs/run-demo/verification.md"]
-        }
-    });
-    fs::write(
-        promoted_dir.join("exp-demo.json"),
-        format!("{}\n", serde_json::to_string_pretty(&promoted_memory)?),
-    )?;
+    write_promoted_memory(workspace.path())?;
 
     let mut cmd = codex_command(codex_home.path())?;
     cmd.args([
@@ -804,6 +836,44 @@ fn create_run(codex_home: &Path, workspace: &Path, run_id: &str) -> Result<()> {
     .arg(workspace)
     .assert()
     .success();
+    Ok(())
+}
+
+fn write_promoted_memory(workspace: &Path) -> Result<()> {
+    let promoted_dir = workspace.join(".bestqa/memory/promoted");
+    fs::create_dir_all(&promoted_dir)?;
+    let promoted_memory = serde_json::json!({
+        "schema_version": "codex-clearloop-core.v0",
+        "id": "exp-demo",
+        "source_session": "run-demo",
+        "problem_model_ref": "pm-startup",
+        "initial_conditions": [{
+            "id": "startup_missing_ready_signal",
+            "name": "Startup readiness notification missing",
+            "kind": "observed",
+            "observed_value": "present"
+        }],
+        "target_condition": {
+            "condition_ref": "server_ready",
+            "target_value": "true",
+            "success_signal": "server ready notification"
+        },
+        "verification_result": {
+            "rule_ref": "run-verification",
+            "passed": true,
+            "evidence_ref": ".bestqa/agent-runs/run-demo/verification.md",
+            "summary": "Verified ready notification observed."
+        },
+        "reusable_update": {
+            "claim": "Server readiness depends on an observable ready notification.",
+            "applicability_conditions": ["startup flow has a ready signal"],
+            "evidence_refs": [".bestqa/agent-runs/run-demo/verification.md"]
+        }
+    });
+    fs::write(
+        promoted_dir.join("exp-demo.json"),
+        format!("{}\n", serde_json::to_string_pretty(&promoted_memory)?),
+    )?;
     Ok(())
 }
 

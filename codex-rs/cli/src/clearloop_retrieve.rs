@@ -6,6 +6,7 @@ use anyhow::Context;
 use clap::Parser;
 use codex_clearloop_core::ClearLoopStore;
 use codex_clearloop_core::Experience;
+use codex_clearloop_core::RetrievedMemoryRef;
 use codex_clearloop_core::SCHEMA_VERSION;
 use serde::Serialize;
 
@@ -45,20 +46,13 @@ struct RetrievalArtifact {
     schema_version: String,
     id: String,
     task: String,
-    matches: Vec<RetrievalMatch>,
+    matches: Vec<RetrievedMemoryRef>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct RetrievalMatch {
-    experience_id: String,
-    source_session: String,
-    problem_model_ref: String,
-    target_condition: String,
-    score: usize,
-    claim: Option<String>,
-    evidence_refs: Vec<String>,
-    memory_ref: String,
+#[derive(Debug)]
+pub(crate) struct RetrievalResult {
+    pub path: PathBuf,
+    pub matches: Vec<RetrievedMemoryRef>,
 }
 
 pub(crate) fn run_retrieve(args: RetrieveArgs) -> anyhow::Result<()> {
@@ -67,36 +61,18 @@ pub(crate) fn run_retrieve(args: RetrieveArgs) -> anyhow::Result<()> {
     let retrieval_id = args
         .id
         .unwrap_or_else(|| generated_id("retrieval", args.task.as_str()));
-    let task_tokens = tokens(args.task.as_str());
-    let mut matches = promoted_memory_matches(&store, &task_tokens, args.min_score)
-        .context("failed to retrieve promoted memory")?;
+    let result = write_promoted_memory_retrieval(
+        &store,
+        retrieval_id.as_str(),
+        args.task.as_str(),
+        args.limit,
+        args.min_score,
+    )
+    .context("failed to retrieve promoted memory")?;
 
-    matches.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.experience_id.cmp(&right.experience_id))
-    });
-    matches.truncate(args.limit);
-
-    let artifact = RetrievalArtifact {
-        schema_version: SCHEMA_VERSION.to_string(),
-        id: retrieval_id.clone(),
-        task: args.task,
-        matches,
-    };
-    let retrieval_path = store.retrieval_path(&retrieval_id)?;
-    if let Some(parent) = retrieval_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let text = serde_json::to_string_pretty(&artifact).context("failed to serialize retrieval")?;
-    fs::write(&retrieval_path, format!("{text}\n"))
-        .with_context(|| format!("failed to write {}", retrieval_path.display()))?;
-
-    println!("Retrieval artifact: {}", retrieval_path.display());
-    println!("Matches: {}", artifact.matches.len());
-    for candidate in &artifact.matches {
+    println!("Retrieval artifact: {}", result.path.display());
+    println!("Matches: {}", result.matches.len());
+    for candidate in &result.matches {
         println!(
             "- {} score={} problem_model={} target={}",
             candidate.experience_id,
@@ -109,11 +85,58 @@ pub(crate) fn run_retrieve(args: RetrieveArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn write_promoted_memory_retrieval(
+    store: &ClearLoopStore,
+    retrieval_id: &str,
+    task: &str,
+    limit: usize,
+    min_score: usize,
+) -> anyhow::Result<RetrievalResult> {
+    let task_tokens = tokens(task);
+    let mut matches = promoted_memory_matches(store, &task_tokens, min_score)?;
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.experience_id.cmp(&right.experience_id))
+    });
+    matches.truncate(limit);
+
+    let retrieval_path = store.retrieval_path(retrieval_id)?;
+    let retrieval_ref = retrieval_path
+        .strip_prefix(store.workspace_root())
+        .unwrap_or(retrieval_path.as_path())
+        .display()
+        .to_string();
+    for candidate in &mut matches {
+        candidate.retrieval_ref = Some(retrieval_ref.clone());
+    }
+
+    let artifact = RetrievalArtifact {
+        schema_version: SCHEMA_VERSION.to_string(),
+        id: retrieval_id.to_string(),
+        task: task.to_string(),
+        matches: matches.clone(),
+    };
+    if let Some(parent) = retrieval_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&artifact).context("failed to serialize retrieval")?;
+    fs::write(&retrieval_path, format!("{text}\n"))
+        .with_context(|| format!("failed to write {}", retrieval_path.display()))?;
+
+    Ok(RetrievalResult {
+        path: retrieval_path,
+        matches,
+    })
+}
+
 fn promoted_memory_matches(
     store: &ClearLoopStore,
     task_tokens: &BTreeSet<String>,
     min_score: usize,
-) -> anyhow::Result<Vec<RetrievalMatch>> {
+) -> anyhow::Result<Vec<RetrievedMemoryRef>> {
     let memory_dir = store.promoted_memory_dir();
     if !memory_dir.exists() {
         return Ok(Vec::new());
@@ -151,7 +174,7 @@ fn promoted_memory_matches(
             .display()
             .to_string();
         let reusable_update = experience.reusable_update.as_ref();
-        matches.push(RetrievalMatch {
+        matches.push(RetrievedMemoryRef {
             experience_id: experience.id,
             source_session: experience.source_session,
             problem_model_ref: experience.problem_model_ref,
@@ -162,6 +185,7 @@ fn promoted_memory_matches(
                 .map(|update| update.evidence_refs.clone())
                 .unwrap_or_default(),
             memory_ref,
+            retrieval_ref: None,
         });
     }
 
