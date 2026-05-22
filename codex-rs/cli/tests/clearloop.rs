@@ -383,6 +383,125 @@ fn clearloop_v0_loop_promotes_model_reviewed_memory() -> Result<()> {
 }
 
 #[test]
+fn clearloop_retrieve_finds_promoted_memory() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let promoted_dir = workspace.path().join(".bestqa/memory/promoted");
+    fs::create_dir_all(&promoted_dir)?;
+    let promoted_memory = serde_json::json!({
+        "schema_version": "codex-clearloop-core.v0",
+        "id": "exp-demo",
+        "source_session": "run-demo",
+        "problem_model_ref": "pm-startup",
+        "initial_conditions": [{
+            "id": "startup_missing_ready_signal",
+            "name": "Startup readiness notification missing",
+            "kind": "observed",
+            "observed_value": "present"
+        }],
+        "target_condition": {
+            "condition_ref": "server_ready",
+            "target_value": "true",
+            "success_signal": "server ready notification"
+        },
+        "verification_result": {
+            "rule_ref": "run-verification",
+            "passed": true,
+            "evidence_ref": ".bestqa/agent-runs/run-demo/verification.md",
+            "summary": "Verified ready notification observed."
+        },
+        "reusable_update": {
+            "claim": "Server readiness depends on an observable ready notification.",
+            "applicability_conditions": ["startup flow has a ready signal"],
+            "evidence_refs": [".bestqa/agent-runs/run-demo/verification.md"]
+        }
+    });
+    fs::write(
+        promoted_dir.join("exp-demo.json"),
+        format!("{}\n", serde_json::to_string_pretty(&promoted_memory)?),
+    )?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args([
+        "clearloop",
+        "retrieve",
+        "--id",
+        "ret-demo",
+        "--task",
+        "server readiness notification failed",
+        "--limit",
+        "5",
+        "-C",
+    ])
+    .arg(workspace.path())
+    .assert()
+    .success()
+    .stdout(contains("Retrieval artifact:"))
+    .stdout(contains("Matches: 1"))
+    .stdout(contains("exp-demo"));
+
+    let retrieval = read_json(
+        workspace
+            .path()
+            .join(".bestqa/retrievals/ret-demo.json")
+            .as_path(),
+    )?;
+    assert_eq!(retrieval["id"].as_str(), Some("ret-demo"));
+    assert_eq!(
+        retrieval["task"].as_str(),
+        Some("server readiness notification failed")
+    );
+    assert_eq!(
+        retrieval["matches"][0]["experience_id"].as_str(),
+        Some("exp-demo")
+    );
+    assert_eq!(
+        retrieval["matches"][0]["claim"].as_str(),
+        Some("Server readiness depends on an observable ready notification.")
+    );
+    assert!(
+        retrieval["matches"][0]["score"]
+            .as_u64()
+            .is_some_and(|score| score >= 3)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn clearloop_retrieve_writes_empty_artifact_without_promoted_memory() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args([
+        "clearloop",
+        "retrieve",
+        "--id",
+        "ret-empty",
+        "--task",
+        "brand new unknown problem",
+        "-C",
+    ])
+    .arg(workspace.path())
+    .assert()
+    .success()
+    .stdout(contains("Retrieval artifact:"))
+    .stdout(contains("Matches: 0"));
+
+    let retrieval = read_json(
+        workspace
+            .path()
+            .join(".bestqa/retrievals/ret-empty.json")
+            .as_path(),
+    )?;
+    assert_eq!(retrieval["id"].as_str(), Some("ret-empty"));
+    assert!(retrieval["matches"].as_array().is_some_and(Vec::is_empty));
+
+    Ok(())
+}
+
+#[test]
 fn clearloop_verify_updates_manifest_and_verification_artifact() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
@@ -740,8 +859,10 @@ fn write_fake_review_codex_bin(dir: &Path, review_json: &str) -> Result<std::pat
     let script = if cfg!(windows) {
         ["@echo off".to_string(), format!("echo {message}")].join("\r\n")
     } else {
-        ["#!/bin/sh".to_string(),
-            format!("printf '%s\\n' '{message}'")]
+        [
+            "#!/bin/sh".to_string(),
+            format!("printf '%s\\n' '{message}'"),
+        ]
         .join("\n")
     };
     fs::write(&path, script)?;

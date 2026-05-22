@@ -62,6 +62,10 @@ impl ClearLoopStore {
         self.bestqa_root().join("memory").join("promoted")
     }
 
+    pub fn retrievals_dir(&self) -> PathBuf {
+        self.bestqa_root().join("retrievals")
+    }
+
     pub fn agent_runs_dir(&self) -> PathBuf {
         self.bestqa_root().join("agent-runs")
     }
@@ -86,6 +90,10 @@ impl ClearLoopStore {
         Ok(self
             .promoted_memory_dir()
             .join(format!("{}.json", safe_id(id)?)))
+    }
+
+    pub fn retrieval_path(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.retrievals_dir().join(format!("{}.json", safe_id(id)?)))
     }
 
     pub fn run_dir(&self, run_id: &str) -> Result<PathBuf> {

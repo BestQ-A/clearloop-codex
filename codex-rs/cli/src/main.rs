@@ -48,6 +48,7 @@ use supports_color::Stream;
 mod app_cmd;
 mod clearloop_cmd;
 mod clearloop_memory;
+mod clearloop_retrieve;
 mod clearloop_verify;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod desktop_app;

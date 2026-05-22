@@ -37,6 +37,7 @@ use codex_clearloop_core::map_codex_exec_event_with_source;
 
 use crate::clearloop_memory::PromoteArgs;
 use crate::clearloop_memory::ReviewArgs;
+use crate::clearloop_retrieve::RetrieveArgs;
 use crate::clearloop_verify::VerifyArgs;
 
 #[derive(Debug, Parser)]
@@ -71,6 +72,9 @@ pub enum ClearLoopSubcommand {
 
     /// Promote an accepted memory candidate into reusable memory.
     Promote(PromoteArgs),
+
+    /// Retrieve promoted memory for a new task.
+    Retrieve(RetrieveArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -276,6 +280,7 @@ impl ClearLoopCli {
             ClearLoopSubcommand::Remember(args) => run_remember(args),
             ClearLoopSubcommand::Review(args) => crate::clearloop_memory::run_review(args),
             ClearLoopSubcommand::Promote(args) => crate::clearloop_memory::run_promote(args),
+            ClearLoopSubcommand::Retrieve(args) => crate::clearloop_retrieve::run_retrieve(args),
         }
     }
 }
@@ -652,7 +657,7 @@ fn observed_condition(condition: &str) -> Condition {
     }
 }
 
-fn generated_id(prefix: &str, seed: &str) -> String {
+pub(crate) fn generated_id(prefix: &str, seed: &str) -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
