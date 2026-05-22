@@ -2,8 +2,11 @@ use std::env;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
+use std::process::Output;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -22,6 +25,7 @@ use codex_clearloop_core::MANIFEST_FILE;
 use codex_clearloop_core::MemoryUpdate;
 use codex_clearloop_core::ReasoningMode;
 use codex_clearloop_core::RunManifest;
+use codex_clearloop_core::RunStatus;
 use codex_clearloop_core::StreamRecord;
 use codex_clearloop_core::ThinkingProgram;
 use codex_clearloop_core::VerificationResult;
@@ -44,6 +48,9 @@ pub enum ClearLoopSubcommand {
 
     /// Ingest observable Codex JSONL events into an existing run ledger.
     Ingest(IngestArgs),
+
+    /// Run Codex exec under ClearLoop and ingest its observable JSONL event stream.
+    Execute(ExecuteArgs),
 
     /// Write a draft reusable experience from an observed run.
     Remember(RememberArgs),
@@ -144,6 +151,57 @@ pub struct IngestArgs {
 
 #[derive(Debug, Parser)]
 #[command(
+    bin_name = "codex clearloop execute",
+    after_help = "Examples:\n  codex clearloop execute --task \"Fix failing startup\" -C .\n  codex clearloop execute --id run-123 --task \"Fix failing startup\" --model gpt-5.5 -C ."
+)]
+pub struct ExecuteArgs {
+    /// Workspace root where `.bestqa` should be written and Codex exec should run.
+    #[arg(short = 'C', long = "cd", value_name = "DIR")]
+    pub cwd: Option<PathBuf>,
+
+    /// Stable run id. Defaults to a timestamped id.
+    #[arg(long = "id", value_name = "ID")]
+    pub id: Option<String>,
+
+    /// User task to send to `codex exec`.
+    #[arg(long = "task", value_name = "TASK")]
+    pub task: String,
+
+    /// Thinking program id used for this run.
+    #[arg(long = "thinking-program", value_name = "ID")]
+    pub thinking_program: Option<String>,
+
+    /// Existing problem model id, if this run belongs to a known problem type.
+    #[arg(long = "problem-model", value_name = "ID")]
+    pub problem_model: Option<String>,
+
+    /// Reasoning mode for this run: llm-primary, hybrid, or db-primary.
+    #[arg(
+        long = "reasoning-mode",
+        value_name = "MODE",
+        default_value = "llm-primary"
+    )]
+    pub reasoning_mode: ReasoningModeArg,
+
+    /// Optional model forwarded to `codex exec --model`.
+    #[arg(long = "model", value_name = "MODEL")]
+    pub model: Option<String>,
+
+    /// Optional `-c key=value` override forwarded to `codex exec`.
+    #[arg(long = "exec-config", value_name = "KEY=VALUE")]
+    pub config_overrides: Vec<String>,
+
+    /// Additional raw argument forwarded to `codex exec` before the prompt.
+    #[arg(long = "exec-arg", value_name = "ARG")]
+    pub exec_args: Vec<String>,
+
+    /// Codex binary to execute. Defaults to the current executable.
+    #[arg(long = "codex-bin", value_name = "FILE")]
+    pub codex_bin: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+#[command(
     bin_name = "codex clearloop remember",
     after_help = "Examples:\n  codex clearloop remember --run-id run-123 --problem-model pm-startup --target-condition server_ready --claim \"startup fails when the ready notification is absent\""
 )]
@@ -196,6 +254,7 @@ impl ClearLoopCli {
             ClearLoopSubcommand::Think(args) => run_think(args),
             ClearLoopSubcommand::Run(args) => run_run(args),
             ClearLoopSubcommand::Ingest(args) => run_ingest(args),
+            ClearLoopSubcommand::Execute(args) => run_execute(args),
             ClearLoopSubcommand::Remember(args) => run_remember(args),
         }
     }
@@ -294,34 +353,13 @@ fn run_ingest(args: IngestArgs) -> anyhow::Result<()> {
     let file = File::open(&args.jsonl)
         .with_context(|| format!("failed to open JSONL file {}", args.jsonl.display()))?;
     let reader = BufReader::new(file);
-    let mut report = EventBridgeReport::default();
-
-    for (index, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| {
-            format!(
-                "failed to read JSONL line {} from {}",
-                index + 1,
-                args.jsonl.display()
-            )
-        })?;
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let payload = serde_json::from_str(line).with_context(|| {
-            format!(
-                "failed to parse JSONL line {} from {}",
-                index + 1,
-                args.jsonl.display()
-            )
-        })?;
-        let event = map_codex_exec_event_with_source(payload, args.source.as_str());
-        store
-            .append_event(&args.run_id, &event)
-            .with_context(|| format!("failed to append event for run {}", args.run_id))?;
-        report.record(&event);
-    }
+    let report = ingest_codex_exec_jsonl_reader(
+        &store,
+        args.run_id.as_str(),
+        args.source.as_str(),
+        reader,
+        args.jsonl.display().to_string().as_str(),
+    )?;
 
     println!("Events ingested: {}", report.events_ingested);
     println!("Run ledger updated: {}", run_dir.display());
@@ -334,6 +372,90 @@ fn run_ingest(args: IngestArgs) -> anyhow::Result<()> {
         report.tool_events,
         report.decision_events
     );
+    Ok(())
+}
+
+fn run_execute(args: ExecuteArgs) -> anyhow::Result<()> {
+    let workspace_root = workspace_root(args.cwd.as_deref())?;
+    let store = ClearLoopStore::new(&workspace_root);
+    let run_id = args
+        .id
+        .clone()
+        .unwrap_or_else(|| generated_id("run", args.task.as_str()));
+    let reasoning_mode = ReasoningMode::from(args.reasoning_mode);
+
+    let mut manifest = RunManifest {
+        run_id,
+        task: args.task.clone(),
+        workspace_root: workspace_root.display().to_string(),
+        status: RunStatus::Running,
+        reasoning_mode,
+        problem_model_ref: args.problem_model.clone(),
+        thinking_program_ref: args.thinking_program.clone(),
+        ..RunManifest::default()
+    };
+    let run_dir = store
+        .create_run_ledger(&manifest)
+        .context("failed to initialize controlled run ledger")?;
+    store
+        .append_event(
+            &manifest.run_id,
+            &LedgerEvent::ExplicitReasoning(StreamRecord::new(
+                "clearloop-cli",
+                "Controlled Codex exec started; JSONL output will be captured and ingested.",
+            )),
+        )
+        .context("failed to append controlled run start event")?;
+
+    let output = run_codex_exec(&args, &workspace_root)?;
+    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let raw_events_path = store
+        .write_codex_exec_events(&manifest.run_id, &stdout_text)
+        .context("failed to write raw Codex exec JSONL events")?;
+
+    let stderr_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr_text.is_empty() {
+        let mut record = StreamRecord::new("codex-exec", "Codex exec wrote stderr output.");
+        record.payload = serde_json::json!({ "stderr": stderr_text });
+        store
+            .append_event(&manifest.run_id, &LedgerEvent::Evidence(record))
+            .context("failed to append Codex exec stderr evidence")?;
+    }
+
+    let report_result = ingest_codex_exec_jsonl_reader(
+        &store,
+        manifest.run_id.as_str(),
+        "codex-exec-json",
+        Cursor::new(stdout_text.as_bytes()),
+        raw_events_path.display().to_string().as_str(),
+    );
+    manifest.status = if output.status.success() && report_result.is_ok() {
+        RunStatus::WaitingForReview
+    } else {
+        RunStatus::FailedExecution
+    };
+    store
+        .save_run_manifest(&manifest)
+        .context("failed to update controlled run manifest")?;
+    let report = report_result?;
+
+    println!("Controlled run ledger: {}", run_dir.display());
+    println!("Raw Codex events: {}", raw_events_path.display());
+    println!("Events ingested: {}", report.events_ingested);
+    println!(
+        "Streams: evidence={}, commands={}, model_visible_output={}, explicit_reasoning={}, tools={}, decisions={}",
+        report.evidence_events,
+        report.command_events,
+        report.model_visible_output_events,
+        report.explicit_reasoning_events,
+        report.tool_events,
+        report.decision_events
+    );
+
+    if !output.status.success() {
+        bail!("controlled Codex exec failed with status {}", output.status);
+    }
+
     Ok(())
 }
 
@@ -370,6 +492,64 @@ fn run_remember(args: RememberArgs) -> anyhow::Result<()> {
     println!("Draft experience id: {}", experience.id);
     println!("Memory gate: draft only, not promoted");
     Ok(())
+}
+
+fn ingest_codex_exec_jsonl_reader<R: BufRead>(
+    store: &ClearLoopStore,
+    run_id: &str,
+    source: &str,
+    reader: R,
+    origin: &str,
+) -> anyhow::Result<EventBridgeReport> {
+    let mut report = EventBridgeReport::default();
+
+    for (index, line) in reader.lines().enumerate() {
+        let line =
+            line.with_context(|| format!("failed to read JSONL line {} from {origin}", index + 1))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let payload = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse JSONL line {} from {origin}", index + 1))?;
+        let event = map_codex_exec_event_with_source(payload, source);
+        store
+            .append_event(run_id, &event)
+            .with_context(|| format!("failed to append event for run {run_id}"))?;
+        report.record(&event);
+    }
+
+    Ok(report)
+}
+
+fn run_codex_exec(args: &ExecuteArgs, workspace_root: &Path) -> anyhow::Result<Output> {
+    let codex_bin = match args.codex_bin.as_ref() {
+        Some(path) => path.clone(),
+        None => env::current_exe().context("failed to resolve current Codex executable")?,
+    };
+    let mut command = ProcessCommand::new(&codex_bin);
+    command
+        .arg("exec")
+        .arg("--json")
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(workspace_root)
+        .current_dir(workspace_root);
+    if let Some(model) = args.model.as_ref() {
+        command.arg("--model").arg(model);
+    }
+    for config_override in &args.config_overrides {
+        command.arg("-c").arg(config_override);
+    }
+    for exec_arg in &args.exec_args {
+        command.arg(exec_arg);
+    }
+    command.arg(&args.task);
+
+    command
+        .output()
+        .with_context(|| format!("failed to run Codex executable {}", codex_bin.display()))
 }
 
 fn workspace_root(cwd: Option<&Path>) -> anyhow::Result<PathBuf> {

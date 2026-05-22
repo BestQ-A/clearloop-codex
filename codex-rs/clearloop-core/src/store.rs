@@ -4,6 +4,7 @@ use crate::domain::ThinkingProgram;
 use crate::error::ClearLoopError;
 use crate::error::Result;
 use crate::ledger::CHANGES_FILE;
+use crate::ledger::CODEX_EXEC_EVENTS_FILE;
 use crate::ledger::COMMAND_STREAM;
 use crate::ledger::DECISION_STREAM;
 use crate::ledger::EVIDENCE_STREAM;
@@ -79,6 +80,14 @@ impl ClearLoopStore {
         Ok(self.agent_runs_dir().join(safe_id(run_id)?))
     }
 
+    pub fn run_manifest_path(&self, run_id: &str) -> Result<PathBuf> {
+        Ok(self.run_dir(run_id)?.join(MANIFEST_FILE))
+    }
+
+    pub fn codex_exec_events_path(&self, run_id: &str) -> Result<PathBuf> {
+        Ok(self.run_dir(run_id)?.join(CODEX_EXEC_EVENTS_FILE))
+    }
+
     pub fn save_problem_model(&self, model: &ProblemModel) -> Result<PathBuf> {
         let path = self.problem_model_path(&model.id)?;
         write_json(&path, model)?;
@@ -113,7 +122,7 @@ impl ClearLoopStore {
         let run_dir = self.run_dir(&manifest.run_id)?;
         create_dir(&run_dir)?;
 
-        write_json(&run_dir.join(MANIFEST_FILE), manifest)?;
+        self.save_run_manifest(manifest)?;
         write_text(
             &run_dir.join(CHANGES_FILE),
             "{\n  \"changed_files\": []\n}\n",
@@ -126,6 +135,7 @@ impl ClearLoopStore {
             &run_dir.join(RESULT_FILE),
             "# Result\n\nNo result recorded yet.\n",
         )?;
+        write_text(&run_dir.join(CODEX_EXEC_EVENTS_FILE), "")?;
 
         for stream in [
             EVIDENCE_STREAM,
@@ -139,6 +149,22 @@ impl ClearLoopStore {
         }
 
         Ok(run_dir)
+    }
+
+    pub fn save_run_manifest(&self, manifest: &RunManifest) -> Result<PathBuf> {
+        let path = self.run_manifest_path(&manifest.run_id)?;
+        write_json(&path, manifest)?;
+        Ok(path)
+    }
+
+    pub fn load_run_manifest(&self, run_id: &str) -> Result<RunManifest> {
+        read_json(&self.run_manifest_path(run_id)?)
+    }
+
+    pub fn write_codex_exec_events(&self, run_id: &str, text: &str) -> Result<PathBuf> {
+        let path = self.codex_exec_events_path(run_id)?;
+        write_text(&path, text)?;
+        Ok(path)
     }
 
     pub fn append_event(&self, run_id: &str, event: &LedgerEvent) -> Result<PathBuf> {
@@ -234,6 +260,7 @@ mod tests {
     use crate::ledger::EXPLICIT_REASONING_STREAM;
     use crate::ledger::LedgerEvent;
     use crate::ledger::RunManifest;
+    use crate::ledger::RunStatus;
     use crate::ledger::StreamRecord;
     use crate::maturity::ProblemModelMaturity;
     use crate::maturity::ReasoningMode;
@@ -331,9 +358,39 @@ mod tests {
 
         assert_eq!(event_path, run_dir.join(EXPLICIT_REASONING_STREAM));
         assert!(run_dir.join(MANIFEST_FILE).exists());
+        assert!(run_dir.join(CODEX_EXEC_EVENTS_FILE).exists());
         assert!(run_dir.join(MODEL_VISIBLE_OUTPUT_STREAM).exists());
         assert!(run_dir.join(TOOL_EVENT_STREAM).exists());
         assert!(run_dir.join(DECISION_STREAM).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn run_manifest_and_raw_codex_events_roundtrip() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(|source| ClearLoopError::Io {
+            path: PathBuf::from("tempdir"),
+            source,
+        })?;
+        let store = ClearLoopStore::new(temp.path());
+        let mut manifest = RunManifest {
+            run_id: "run-raw-events".to_string(),
+            task: "capture codex exec json".to_string(),
+            ..RunManifest::default()
+        };
+
+        let run_dir = store.create_run_ledger(&manifest)?;
+        manifest.status = RunStatus::WaitingForReview;
+        store.save_run_manifest(&manifest)?;
+        store.write_codex_exec_events(&manifest.run_id, "{\"type\":\"turn.started\"}\n")?;
+        let raw_events_path = run_dir.join(CODEX_EXEC_EVENTS_FILE);
+        let raw_events =
+            fs::read_to_string(&raw_events_path).map_err(|source| ClearLoopError::Io {
+                path: raw_events_path.clone(),
+                source,
+            })?;
+
+        assert_eq!(store.load_run_manifest(&manifest.run_id)?, manifest);
+        assert_eq!(raw_events, "{\"type\":\"turn.started\"}\n");
         Ok(())
     }
 }

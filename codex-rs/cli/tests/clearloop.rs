@@ -164,6 +164,53 @@ fn clearloop_ingest_routes_codex_exec_json_events() -> Result<()> {
 }
 
 #[test]
+fn clearloop_execute_runs_codex_exec_and_ingests_events() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let fake_codex = write_fake_codex_bin(workspace.path())?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args([
+        "clearloop",
+        "execute",
+        "--id",
+        "run-demo",
+        "--task",
+        "Fix startup failure",
+        "--codex-bin",
+    ])
+    .arg(&fake_codex)
+    .args(["-C"])
+    .arg(workspace.path())
+    .assert()
+    .success()
+    .stdout(contains("Controlled run ledger:"))
+    .stdout(contains("Raw Codex events:"))
+    .stdout(contains("Events ingested: 4"))
+    .stdout(contains("model_visible_output=1"))
+    .stdout(contains("explicit_reasoning=1"))
+    .stdout(contains("commands=1"));
+
+    let run_dir = workspace.path().join(".bestqa/agent-runs/run-demo");
+    let manifest = read_json(run_dir.join("manifest.json").as_path())?;
+    assert_eq!(manifest["status"].as_str(), Some("waiting_for_review"));
+    assert!(fs::read_to_string(run_dir.join("codex-exec-events.jsonl"))?.contains("fake-thread"));
+    assert!(
+        fs::read_to_string(run_dir.join("model-visible-output.jsonl"))?.contains("Controlled done")
+    );
+    assert!(
+        fs::read_to_string(run_dir.join("explicit-reasoning.jsonl"))?
+            .contains("Check observable output")
+    );
+    assert!(
+        fs::read_to_string(run_dir.join("commands.jsonl"))?
+            .contains("cargo test -p codex-clearloop-core")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn clearloop_remember_writes_draft_experience_only() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
@@ -213,4 +260,43 @@ fn clearloop_remember_writes_draft_experience_only() -> Result<()> {
 fn read_json(path: &Path) -> Result<Value> {
     let text = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
+}
+
+fn write_fake_codex_bin(dir: &Path) -> Result<std::path::PathBuf> {
+    let path = if cfg!(windows) {
+        dir.join("fake-codex.cmd")
+    } else {
+        dir.join("fake-codex")
+    };
+    let script = if cfg!(windows) {
+        [
+            "@echo off",
+            "echo {\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}",
+            "echo {\"type\":\"item.completed\",\"item\":{\"id\":\"msg-1\",\"type\":\"agent_message\",\"text\":\"Controlled done\"}}",
+            "echo {\"type\":\"item.completed\",\"item\":{\"id\":\"reason-1\",\"type\":\"reasoning\",\"text\":\"Check observable output.\"}}",
+            "echo {\"type\":\"item.completed\",\"item\":{\"id\":\"cmd-1\",\"type\":\"command_execution\",\"command\":\"cargo test -p codex-clearloop-core\",\"aggregated_output\":\"ok\",\"exit_code\":0,\"status\":\"completed\"}}",
+        ]
+        .join("\r\n")
+    } else {
+        [
+            "#!/bin/sh",
+            "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}'",
+            "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"msg-1\",\"type\":\"agent_message\",\"text\":\"Controlled done\"}}'",
+            "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"reason-1\",\"type\":\"reasoning\",\"text\":\"Check observable output.\"}}'",
+            "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"cmd-1\",\"type\":\"command_execution\",\"command\":\"cargo test -p codex-clearloop-core\",\"aggregated_output\":\"ok\",\"exit_code\":0,\"status\":\"completed\"}}'",
+        ]
+        .join("\n")
+    };
+    fs::write(&path, script)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions)?;
+    }
+
+    Ok(path)
 }
