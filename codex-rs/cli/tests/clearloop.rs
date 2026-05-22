@@ -212,6 +212,70 @@ fn clearloop_execute_runs_codex_exec_and_ingests_events() -> Result<()> {
 }
 
 #[test]
+fn clearloop_verify_updates_manifest_and_verification_artifact() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+
+    create_run(codex_home.path(), workspace.path(), "run-demo")?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args([
+        "clearloop",
+        "verify",
+        "--run-id",
+        "run-demo",
+        "--command",
+        "echo verified",
+        "-C",
+    ])
+    .arg(workspace.path())
+    .assert()
+    .success()
+    .stdout(contains("Verification status: verified"));
+
+    let run_dir = workspace.path().join(".bestqa/agent-runs/run-demo");
+    let manifest = read_json(run_dir.join("manifest.json").as_path())?;
+    assert_eq!(manifest["status"].as_str(), Some("verified"));
+    assert!(fs::read_to_string(run_dir.join("verification.md"))?.contains("Status: passed"));
+    assert!(fs::read_to_string(run_dir.join("verification.md"))?.contains("echo verified"));
+    assert!(fs::read_to_string(run_dir.join("evidence.jsonl"))?.contains("Verification passed"));
+    assert!(fs::read_to_string(run_dir.join("commands.jsonl"))?.contains("echo verified"));
+
+    Ok(())
+}
+
+#[test]
+fn clearloop_verify_records_failed_verification_boundary() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+
+    create_run(codex_home.path(), workspace.path(), "run-demo")?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args([
+        "clearloop",
+        "verify",
+        "--run-id",
+        "run-demo",
+        "--command",
+        "exit 7",
+        "-C",
+    ])
+    .arg(workspace.path())
+    .assert()
+    .failure()
+    .stdout(contains("Verification status: failed_verification"));
+
+    let run_dir = workspace.path().join(".bestqa/agent-runs/run-demo");
+    let manifest = read_json(run_dir.join("manifest.json").as_path())?;
+    assert_eq!(manifest["status"].as_str(), Some("failed_verification"));
+    assert!(fs::read_to_string(run_dir.join("verification.md"))?.contains("Status: failed"));
+    assert!(fs::read_to_string(run_dir.join("evidence.jsonl"))?.contains("Verification failed"));
+
+    Ok(())
+}
+
+#[test]
 fn clearloop_remember_writes_draft_experience_only() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
@@ -261,6 +325,23 @@ fn clearloop_remember_writes_draft_experience_only() -> Result<()> {
 fn read_json(path: &Path) -> Result<Value> {
     let text = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
+}
+
+fn create_run(codex_home: &Path, workspace: &Path, run_id: &str) -> Result<()> {
+    let mut cmd = codex_command(codex_home)?;
+    cmd.args([
+        "clearloop",
+        "run",
+        "--id",
+        run_id,
+        "--task",
+        "Fix startup failure",
+        "-C",
+    ])
+    .arg(workspace)
+    .assert()
+    .success();
+    Ok(())
 }
 
 fn write_fake_codex_bin(dir: &Path) -> Result<std::path::PathBuf> {

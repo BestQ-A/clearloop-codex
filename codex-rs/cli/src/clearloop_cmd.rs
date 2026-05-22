@@ -32,6 +32,8 @@ use codex_clearloop_core::VerificationResult;
 use codex_clearloop_core::final_agent_message_from_codex_exec_jsonl;
 use codex_clearloop_core::map_codex_exec_event_with_source;
 
+use crate::clearloop_verify::VerifyArgs;
+
 #[derive(Debug, Parser)]
 #[command(bin_name = "codex clearloop")]
 pub struct ClearLoopCli {
@@ -52,6 +54,9 @@ pub enum ClearLoopSubcommand {
 
     /// Run Codex exec under ClearLoop and ingest its observable JSONL event stream.
     Execute(ExecuteArgs),
+
+    /// Run a verification command and update the run ledger status.
+    Verify(VerifyArgs),
 
     /// Write a draft reusable experience from an observed run.
     Remember(RememberArgs),
@@ -256,6 +261,7 @@ impl ClearLoopCli {
             ClearLoopSubcommand::Run(args) => run_run(args),
             ClearLoopSubcommand::Ingest(args) => run_ingest(args),
             ClearLoopSubcommand::Execute(args) => run_execute(args),
+            ClearLoopSubcommand::Verify(args) => crate::clearloop_verify::run_verify(args),
             ClearLoopSubcommand::Remember(args) => run_remember(args),
         }
     }
@@ -568,7 +574,7 @@ fn run_codex_exec(args: &ExecuteArgs, workspace_root: &Path) -> anyhow::Result<O
         .with_context(|| format!("failed to run Codex executable {}", codex_bin.display()))
 }
 
-fn workspace_root(cwd: Option<&Path>) -> anyhow::Result<PathBuf> {
+pub(crate) fn workspace_root(cwd: Option<&Path>) -> anyhow::Result<PathBuf> {
     match cwd {
         Some(cwd) => Ok(cwd.to_path_buf()),
         None => env::current_dir().context("failed to read current directory"),

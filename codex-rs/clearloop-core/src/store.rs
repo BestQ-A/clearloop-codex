@@ -14,8 +14,10 @@ use crate::ledger::MANIFEST_FILE;
 use crate::ledger::MODEL_VISIBLE_OUTPUT_STREAM;
 use crate::ledger::RESULT_FILE;
 use crate::ledger::RunManifest;
+use crate::ledger::RunStatus;
 use crate::ledger::TOOL_EVENT_STREAM;
 use crate::ledger::VERIFICATION_FILE;
+use chrono::Utc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -173,6 +175,20 @@ impl ClearLoopStore {
         Ok(path)
     }
 
+    pub fn write_run_verification(&self, run_id: &str, markdown: &str) -> Result<PathBuf> {
+        let path = self.run_dir(run_id)?.join(VERIFICATION_FILE);
+        write_text(&path, markdown)?;
+        Ok(path)
+    }
+
+    pub fn update_run_status(&self, run_id: &str, status: RunStatus) -> Result<RunManifest> {
+        let mut manifest = self.load_run_manifest(run_id)?;
+        manifest.status = status;
+        manifest.updated_at = Utc::now();
+        self.save_run_manifest(&manifest)?;
+        Ok(manifest)
+    }
+
     pub fn append_event(&self, run_id: &str, event: &LedgerEvent) -> Result<PathBuf> {
         let run_dir = self.run_dir(run_id)?;
         create_dir(&run_dir)?;
@@ -266,7 +282,6 @@ mod tests {
     use crate::ledger::EXPLICIT_REASONING_STREAM;
     use crate::ledger::LedgerEvent;
     use crate::ledger::RunManifest;
-    use crate::ledger::RunStatus;
     use crate::ledger::StreamRecord;
     use crate::maturity::ProblemModelMaturity;
     use crate::maturity::ReasoningMode;
@@ -397,6 +412,37 @@ mod tests {
 
         assert_eq!(store.load_run_manifest(&manifest.run_id)?, manifest);
         assert_eq!(raw_events, "{\"type\":\"turn.started\"}\n");
+        Ok(())
+    }
+
+    #[test]
+    fn verification_file_and_status_roundtrip() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(|source| ClearLoopError::Io {
+            path: PathBuf::from("tempdir"),
+            source,
+        })?;
+        let store = ClearLoopStore::new(temp.path());
+        let manifest = RunManifest {
+            run_id: "run-verified".to_string(),
+            task: "verify result".to_string(),
+            ..RunManifest::default()
+        };
+
+        let run_dir = store.create_run_ledger(&manifest)?;
+        store.write_run_verification(&manifest.run_id, "# Verification\n\nPassed.\n")?;
+        let updated = store.update_run_status(&manifest.run_id, RunStatus::Verified)?;
+
+        assert_eq!(updated.status, RunStatus::Verified);
+        assert!(updated.updated_at >= updated.created_at);
+        assert_eq!(
+            fs::read_to_string(run_dir.join(VERIFICATION_FILE)).map_err(|source| {
+                ClearLoopError::Io {
+                    path: run_dir.join(VERIFICATION_FILE),
+                    source,
+                }
+            })?,
+            "# Verification\n\nPassed.\n"
+        );
         Ok(())
     }
 }
