@@ -29,6 +29,7 @@ use codex_clearloop_core::RunStatus;
 use codex_clearloop_core::StreamRecord;
 use codex_clearloop_core::ThinkingProgram;
 use codex_clearloop_core::VerificationResult;
+use codex_clearloop_core::final_agent_message_from_codex_exec_jsonl;
 use codex_clearloop_core::map_codex_exec_event_with_source;
 
 #[derive(Debug, Parser)]
@@ -412,6 +413,21 @@ fn run_execute(args: ExecuteArgs) -> anyhow::Result<()> {
     let raw_events_path = store
         .write_codex_exec_events(&manifest.run_id, &stdout_text)
         .context("failed to write raw Codex exec JSONL events")?;
+    if let Some(final_message) = final_agent_message_from_codex_exec_jsonl(&stdout_text)
+        .with_context(|| {
+            format!(
+                "failed to extract final Codex agent message from {}",
+                raw_events_path.display()
+            )
+        })?
+    {
+        store
+            .write_run_result(
+                &manifest.run_id,
+                &format!("# Result\n\n{}\n", final_message.trim()),
+            )
+            .context("failed to write controlled run result")?;
+    }
 
     let stderr_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !stderr_text.is_empty() {

@@ -36,6 +36,26 @@ pub fn map_codex_exec_event(payload: Value) -> LedgerEvent {
     map_codex_exec_event_with_source(payload, CODEX_EXEC_JSON_SOURCE)
 }
 
+pub fn final_agent_message_from_codex_exec_jsonl(
+    jsonl: &str,
+) -> serde_json::Result<Option<String>> {
+    let mut final_message = None;
+    for line in jsonl.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let payload = serde_json::from_str::<Value>(line)?;
+        if string_at(&payload, "/item/type") == Some("agent_message")
+            && let Some(text) = string_at(&payload, "/item/text")
+        {
+            final_message = Some(text.to_string());
+        }
+    }
+
+    Ok(final_message)
+}
+
 pub fn map_codex_exec_event_with_source(payload: Value, source: impl Into<String>) -> LedgerEvent {
     let source = source.into();
     let event_type = string_at(&payload, "/type")
@@ -218,5 +238,20 @@ mod tests {
         assert_eq!(report.evidence_events, 1);
         assert_eq!(report.explicit_reasoning_events, 1);
         assert_eq!(report.decision_events, 1);
+    }
+
+    #[test]
+    fn extracts_last_agent_message_from_codex_exec_jsonl() {
+        let jsonl = [
+            r#"{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"First"}}"#,
+            r#"{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"Check."}}"#,
+            r#"{"type":"item.completed","item":{"id":"msg-2","type":"agent_message","text":"Final answer"}}"#,
+        ]
+        .join("\n");
+
+        assert_eq!(
+            final_agent_message_from_codex_exec_jsonl(&jsonl).expect("valid jsonl"),
+            Some("Final answer".to_string())
+        );
     }
 }

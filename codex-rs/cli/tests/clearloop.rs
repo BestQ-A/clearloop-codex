@@ -198,6 +198,7 @@ fn clearloop_execute_runs_codex_exec_and_ingests_events() -> Result<()> {
     assert!(
         fs::read_to_string(run_dir.join("model-visible-output.jsonl"))?.contains("Controlled done")
     );
+    assert!(fs::read_to_string(run_dir.join("result.md"))?.contains("Controlled done"));
     assert!(
         fs::read_to_string(run_dir.join("explicit-reasoning.jsonl"))?
             .contains("Check observable output")

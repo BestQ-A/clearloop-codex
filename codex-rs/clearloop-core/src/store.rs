@@ -167,6 +167,12 @@ impl ClearLoopStore {
         Ok(path)
     }
 
+    pub fn write_run_result(&self, run_id: &str, markdown: &str) -> Result<PathBuf> {
+        let path = self.run_dir(run_id)?.join(RESULT_FILE);
+        write_text(&path, markdown)?;
+        Ok(path)
+    }
+
     pub fn append_event(&self, run_id: &str, event: &LedgerEvent) -> Result<PathBuf> {
         let run_dir = self.run_dir(run_id)?;
         create_dir(&run_dir)?;
