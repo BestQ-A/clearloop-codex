@@ -2213,6 +2213,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-clearloop-core"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "codex-cli"
 version = "0.0.0"
 dependencies = [
@@ -2228,6 +2240,7 @@ dependencies = [
  "codex-app-server-test-client",
  "codex-arg0",
  "codex-chatgpt",
+ "codex-clearloop-core",
  "codex-cloud-tasks",
  "codex-config",
  "codex-core",

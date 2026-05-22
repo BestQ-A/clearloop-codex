@@ -46,6 +46,7 @@ use supports_color::Stream;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
+mod clearloop_cmd;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod desktop_app;
 mod doctor;
@@ -61,6 +62,7 @@ use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
 use crate::remote_control_cmd::RemoteControlCommand;
+use clearloop_cmd::ClearLoopCli;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
@@ -136,6 +138,10 @@ enum Subcommand {
 
     /// Manage Codex plugins.
     Plugin(PluginCli),
+
+    /// Use ClearLoop visible programmatic thinking primitives.
+    #[clap(name = "clearloop", alias = "clear-loop")]
+    ClearLoop(ClearLoopCli),
 
     /// Start Codex as an MCP server (stdio).
     McpServer(McpServerCommand),
@@ -955,6 +961,14 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                     plugin_cmd::run_plugin_remove(overrides, args).await?;
                 }
             }
+        }
+        Some(Subcommand::ClearLoop(clearloop_cli)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "clearloop",
+            )?;
+            clearloop_cli.run()?;
         }
         Some(Subcommand::AppServer(app_server_cli)) => {
             let AppServerCommand {
@@ -1854,6 +1868,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::RemoteControl(remote_control)) => Some(remote_control.subcommand_name()),
         Some(Subcommand::Mcp(_)) => Some("mcp"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
+        Some(Subcommand::ClearLoop(_)) => Some("clearloop"),
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Some(Subcommand::App(_)) => Some("app"),
         Some(Subcommand::Login(_)) => Some("login"),
