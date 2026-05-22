@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -22,12 +23,14 @@ use codex_clearloop_core::Experience;
 use codex_clearloop_core::GoalCondition;
 use codex_clearloop_core::LedgerEvent;
 use codex_clearloop_core::MANIFEST_FILE;
+use codex_clearloop_core::MemoryGateDecision;
 use codex_clearloop_core::MemoryUpdate;
 use codex_clearloop_core::ReasoningMode;
 use codex_clearloop_core::RunManifest;
 use codex_clearloop_core::RunStatus;
 use codex_clearloop_core::StreamRecord;
 use codex_clearloop_core::ThinkingProgram;
+use codex_clearloop_core::VERIFICATION_FILE;
 use codex_clearloop_core::VerificationResult;
 use codex_clearloop_core::final_agent_message_from_codex_exec_jsonl;
 use codex_clearloop_core::map_codex_exec_event_with_source;
@@ -483,26 +486,49 @@ fn run_execute(args: ExecuteArgs) -> anyhow::Result<()> {
 
 fn run_remember(args: RememberArgs) -> anyhow::Result<()> {
     let workspace_root = workspace_root(args.cwd.as_deref())?;
-    let store = ClearLoopStore::new(workspace_root);
+    let store = ClearLoopStore::new(&workspace_root);
+    let mut manifest = store
+        .load_run_manifest(&args.run_id)
+        .with_context(|| format!("failed to load source run manifest for {}", args.run_id))?;
+    if manifest.status != RunStatus::Verified {
+        bail!(
+            "remember requires source run '{}' to be verified; current status is {:?}",
+            args.run_id,
+            manifest.status
+        );
+    }
+    let verification_ref = format!(".bestqa/agent-runs/{}/{}", args.run_id, VERIFICATION_FILE);
+    let verification_path = store.run_dir(&args.run_id)?.join(VERIFICATION_FILE);
+    let verification_text = fs::read_to_string(&verification_path)
+        .with_context(|| format!("failed to read {}", verification_path.display()))?;
+    if verification_text.trim().is_empty() || verification_text.contains("Not run yet.") {
+        bail!(
+            "remember requires non-empty verification evidence for run '{}'",
+            args.run_id
+        );
+    }
+
     let id = args
         .id
         .unwrap_or_else(|| generated_id("exp", args.run_id.as_str()));
     let target_condition = goal_condition(args.target_condition.as_str());
     let experience = Experience {
         id,
-        source_session: args.run_id,
+        source_session: args.run_id.clone(),
         problem_model_ref: args.problem_model,
         target_condition,
         verification_result: VerificationResult {
-            rule_ref: "manual-verification-required".to_string(),
-            passed: false,
-            evidence_ref: None,
-            summary: "Draft experience only. It is not promoted memory until verification and review pass.".to_string(),
+            rule_ref: "run-verification".to_string(),
+            passed: true,
+            evidence_ref: Some(verification_ref.clone()),
+            summary:
+                "Source run is verified. Candidate still requires human review before promotion."
+                    .to_string(),
         },
         reusable_update: Some(MemoryUpdate {
             claim: args.claim,
             applicability_conditions: Vec::new(),
-            evidence_refs: Vec::new(),
+            evidence_refs: vec![verification_ref.clone()],
         }),
         ..Experience::default()
     };
@@ -510,9 +536,26 @@ fn run_remember(args: RememberArgs) -> anyhow::Result<()> {
     let path = store
         .save_experience(&experience)
         .context("failed to write draft experience")?;
+    manifest.memory_gate.decision = MemoryGateDecision::CandidateOnly;
+    store
+        .save_run_manifest(&manifest)
+        .context("failed to update source run memory gate")?;
+    let mut decision_record = StreamRecord::new(
+        "clearloop-cli",
+        "Memory candidate created from verified run.",
+    );
+    decision_record.payload = serde_json::json!({
+        "experience_id": experience.id.as_str(),
+        "verification_ref": verification_ref,
+        "memory_gate": "candidate_only",
+    });
+    store
+        .append_event(&args.run_id, &LedgerEvent::Decision(decision_record))
+        .context("failed to append memory candidate decision")?;
+
     println!("Draft experience written: {}", path.display());
     println!("Draft experience id: {}", experience.id);
-    println!("Memory gate: draft only, not promoted");
+    println!("Memory gate: candidate only, not promoted");
     Ok(())
 }
 

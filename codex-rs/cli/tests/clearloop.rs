@@ -276,9 +276,65 @@ fn clearloop_verify_records_failed_verification_boundary() -> Result<()> {
 }
 
 #[test]
-fn clearloop_remember_writes_draft_experience_only() -> Result<()> {
+fn clearloop_remember_blocks_unverified_run() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
+
+    create_run(codex_home.path(), workspace.path(), "run-demo")?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args([
+        "clearloop",
+        "remember",
+        "--id",
+        "exp-demo",
+        "--run-id",
+        "run-demo",
+        "--problem-model",
+        "pm-startup",
+        "--target-condition",
+        "server_ready",
+        "--claim",
+        "Server readiness depends on an observable ready notification.",
+        "-C",
+    ])
+    .arg(workspace.path())
+    .assert()
+    .failure()
+    .stderr(contains(
+        "remember requires source run 'run-demo' to be verified",
+    ));
+
+    assert!(
+        !workspace
+            .path()
+            .join(".bestqa/experiences/exp-demo.json")
+            .exists()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn clearloop_remember_writes_verified_candidate_experience() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+
+    create_run(codex_home.path(), workspace.path(), "run-demo")?;
+    let mut verify = codex_command(codex_home.path())?;
+    verify
+        .args([
+            "clearloop",
+            "verify",
+            "--run-id",
+            "run-demo",
+            "--command",
+            "echo verified",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .success();
 
     let mut cmd = codex_command(codex_home.path())?;
     cmd.args([
@@ -299,7 +355,7 @@ fn clearloop_remember_writes_draft_experience_only() -> Result<()> {
     .arg(workspace.path())
     .assert()
     .success()
-    .stdout(contains("Memory gate: draft only, not promoted"));
+    .stdout(contains("Memory gate: candidate only, not promoted"));
 
     let experience = read_json(
         workspace
@@ -312,11 +368,30 @@ fn clearloop_remember_writes_draft_experience_only() -> Result<()> {
     assert_eq!(experience["problem_model_ref"].as_str(), Some("pm-startup"));
     assert_eq!(
         experience["verification_result"]["passed"].as_bool(),
-        Some(false)
+        Some(true)
+    );
+    assert_eq!(
+        experience["verification_result"]["evidence_ref"].as_str(),
+        Some(".bestqa/agent-runs/run-demo/verification.md")
     );
     assert_eq!(
         experience["reusable_update"]["claim"].as_str(),
         Some("Server readiness depends on an observable ready notification.")
+    );
+    assert_eq!(
+        experience["reusable_update"]["evidence_refs"][0].as_str(),
+        Some(".bestqa/agent-runs/run-demo/verification.md")
+    );
+
+    let run_dir = workspace.path().join(".bestqa/agent-runs/run-demo");
+    let manifest = read_json(run_dir.join("manifest.json").as_path())?;
+    assert_eq!(
+        manifest["memory_gate"]["decision"].as_str(),
+        Some("candidate_only")
+    );
+    assert!(
+        fs::read_to_string(run_dir.join("decisions.jsonl"))?
+            .contains("Memory candidate created from verified run")
     );
 
     Ok(())
