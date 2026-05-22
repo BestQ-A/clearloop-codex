@@ -1,24 +1,31 @@
 use std::env;
+use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
+use anyhow::bail;
 use clap::Parser;
 use codex_clearloop_core::Action;
 use codex_clearloop_core::ClearLoopStore;
 use codex_clearloop_core::Condition;
 use codex_clearloop_core::ConditionKind;
+use codex_clearloop_core::EventBridgeReport;
 use codex_clearloop_core::Experience;
 use codex_clearloop_core::GoalCondition;
 use codex_clearloop_core::LedgerEvent;
+use codex_clearloop_core::MANIFEST_FILE;
 use codex_clearloop_core::MemoryUpdate;
 use codex_clearloop_core::ReasoningMode;
 use codex_clearloop_core::RunManifest;
 use codex_clearloop_core::StreamRecord;
 use codex_clearloop_core::ThinkingProgram;
 use codex_clearloop_core::VerificationResult;
+use codex_clearloop_core::map_codex_exec_event_with_source;
 
 #[derive(Debug, Parser)]
 #[command(bin_name = "codex clearloop")]
@@ -34,6 +41,9 @@ pub enum ClearLoopSubcommand {
 
     /// Initialize a ClearLoop run ledger without executing an agent.
     Run(RunArgs),
+
+    /// Ingest observable Codex JSONL events into an existing run ledger.
+    Ingest(IngestArgs),
 
     /// Write a draft reusable experience from an observed run.
     Remember(RememberArgs),
@@ -107,6 +117,33 @@ pub struct RunArgs {
 
 #[derive(Debug, Parser)]
 #[command(
+    bin_name = "codex clearloop ingest",
+    after_help = "Examples:\n  codex exec --json \"Fix failing startup\" > codex-events.jsonl\n  codex clearloop ingest --run-id run-123 --jsonl codex-events.jsonl -C ."
+)]
+pub struct IngestArgs {
+    /// Workspace root where `.bestqa` should be written.
+    #[arg(short = 'C', long = "cd", value_name = "DIR")]
+    pub cwd: Option<PathBuf>,
+
+    /// Existing ClearLoop run id whose ledger receives these events.
+    #[arg(long = "run-id", value_name = "RUN_ID")]
+    pub run_id: String,
+
+    /// JSONL file emitted by `codex exec --json`.
+    #[arg(long = "jsonl", value_name = "FILE")]
+    pub jsonl: PathBuf,
+
+    /// Source label written into each stream record.
+    #[arg(
+        long = "source",
+        value_name = "SOURCE",
+        default_value = "codex-exec-json"
+    )]
+    pub source: String,
+}
+
+#[derive(Debug, Parser)]
+#[command(
     bin_name = "codex clearloop remember",
     after_help = "Examples:\n  codex clearloop remember --run-id run-123 --problem-model pm-startup --target-condition server_ready --claim \"startup fails when the ready notification is absent\""
 )]
@@ -158,6 +195,7 @@ impl ClearLoopCli {
         match self.subcommand {
             ClearLoopSubcommand::Think(args) => run_think(args),
             ClearLoopSubcommand::Run(args) => run_run(args),
+            ClearLoopSubcommand::Ingest(args) => run_ingest(args),
             ClearLoopSubcommand::Remember(args) => run_remember(args),
         }
     }
@@ -236,6 +274,66 @@ fn run_run(args: RunArgs) -> anyhow::Result<()> {
 
     println!("Run ledger created: {}", run_dir.display());
     println!("Run id: {}", manifest.run_id);
+    Ok(())
+}
+
+fn run_ingest(args: IngestArgs) -> anyhow::Result<()> {
+    let workspace_root = workspace_root(args.cwd.as_deref())?;
+    let store = ClearLoopStore::new(&workspace_root);
+    let run_dir = store.run_dir(&args.run_id)?;
+    let manifest_path = run_dir.join(MANIFEST_FILE);
+    if !manifest_path.exists() {
+        bail!(
+            "run ledger does not exist for '{}'; run `codex clearloop run --id {} --task ... -C {}` first",
+            args.run_id,
+            args.run_id,
+            workspace_root.display()
+        );
+    }
+
+    let file = File::open(&args.jsonl)
+        .with_context(|| format!("failed to open JSONL file {}", args.jsonl.display()))?;
+    let reader = BufReader::new(file);
+    let mut report = EventBridgeReport::default();
+
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| {
+            format!(
+                "failed to read JSONL line {} from {}",
+                index + 1,
+                args.jsonl.display()
+            )
+        })?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let payload = serde_json::from_str(line).with_context(|| {
+            format!(
+                "failed to parse JSONL line {} from {}",
+                index + 1,
+                args.jsonl.display()
+            )
+        })?;
+        let event = map_codex_exec_event_with_source(payload, args.source.as_str());
+        store
+            .append_event(&args.run_id, &event)
+            .with_context(|| format!("failed to append event for run {}", args.run_id))?;
+        report.record(&event);
+    }
+
+    println!("Events ingested: {}", report.events_ingested);
+    println!("Run ledger updated: {}", run_dir.display());
+    println!(
+        "Streams: evidence={}, commands={}, model_visible_output={}, explicit_reasoning={}, tools={}, decisions={}",
+        report.evidence_events,
+        report.command_events,
+        report.model_visible_output_events,
+        report.explicit_reasoning_events,
+        report.tool_events,
+        report.decision_events
+    );
     Ok(())
 }
 

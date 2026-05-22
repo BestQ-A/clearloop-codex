@@ -6,6 +6,7 @@
 
 mod domain;
 mod error;
+mod event_bridge;
 mod ledger;
 mod maturity;
 mod store;
@@ -13,6 +14,7 @@ mod store;
 pub use domain::*;
 pub use error::ClearLoopError;
 pub use error::Result;
+pub use event_bridge::*;
 pub use ledger::*;
 pub use maturity::*;
 pub use store::ClearLoopStore;

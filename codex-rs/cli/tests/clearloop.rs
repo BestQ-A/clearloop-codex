@@ -101,6 +101,69 @@ fn clearloop_run_writes_observable_run_ledger() -> Result<()> {
 }
 
 #[test]
+fn clearloop_ingest_routes_codex_exec_json_events() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+
+    let mut run_cmd = codex_command(codex_home.path())?;
+    run_cmd
+        .args([
+            "clearloop",
+            "run",
+            "--id",
+            "run-demo",
+            "--task",
+            "Fix startup failure",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .success();
+
+    let jsonl_path = workspace.path().join("codex-events.jsonl");
+    fs::write(
+        &jsonl_path,
+        [
+            r#"{"type":"thread.started","thread_id":"thread-1"}"#,
+            r#"{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"Ready notification is missing."}}"#,
+            r#"{"type":"item.completed","item":{"id":"cmd-1","type":"command_execution","command":"cargo test -p codex-clearloop-core","aggregated_output":"ok","exit_code":0,"status":"completed"}}"#,
+            r#"{"type":"item.updated","item":{"id":"todo-1","type":"todo_list","items":[{"text":"Verify ready notification","completed":true}]}}"#,
+            r#"{"type":"turn.failed","error":{"message":"verification failed"}}"#,
+        ]
+        .join("\n"),
+    )?;
+
+    let mut ingest_cmd = codex_command(codex_home.path())?;
+    ingest_cmd
+        .args(["clearloop", "ingest", "--run-id", "run-demo", "--jsonl"])
+        .arg(&jsonl_path)
+        .args(["-C"])
+        .arg(workspace.path())
+        .assert()
+        .success()
+        .stdout(contains("Events ingested: 5"))
+        .stdout(contains("model_visible_output=1"))
+        .stdout(contains("commands=1"))
+        .stdout(contains("decisions=1"));
+
+    let run_dir = workspace.path().join(".bestqa/agent-runs/run-demo");
+    assert!(
+        fs::read_to_string(run_dir.join("model-visible-output.jsonl"))?
+            .contains("Ready notification is missing")
+    );
+    assert!(
+        fs::read_to_string(run_dir.join("commands.jsonl"))?
+            .contains("cargo test -p codex-clearloop-core")
+    );
+    assert!(
+        fs::read_to_string(run_dir.join("decisions.jsonl"))?.contains("Verify ready notification")
+    );
+    assert!(fs::read_to_string(run_dir.join("evidence.jsonl"))?.contains("verification failed"));
+
+    Ok(())
+}
+
+#[test]
 fn clearloop_remember_writes_draft_experience_only() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
