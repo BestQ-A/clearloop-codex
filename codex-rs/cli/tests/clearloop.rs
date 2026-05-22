@@ -157,6 +157,7 @@ fn clearloop_run_writes_observable_run_ledger() -> Result<()> {
     assert!(run_dir.join("explicit-reasoning.jsonl").exists());
     assert!(run_dir.join("tool-events.jsonl").exists());
     assert!(run_dir.join("decisions.jsonl").exists());
+    assert!(run_dir.join("execution-prompt.md").exists());
     assert!(
         fs::read_to_string(run_dir.join("explicit-reasoning.jsonl"))?
             .contains("Run ledger initialized")
@@ -271,6 +272,64 @@ fn clearloop_execute_runs_codex_exec_and_ingests_events() -> Result<()> {
     assert!(
         fs::read_to_string(run_dir.join("commands.jsonl"))?
             .contains("cargo test -p codex-clearloop-core")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn clearloop_execute_uses_retrieved_memory_prompt() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let fake_codex = write_fake_codex_bin(workspace.path())?;
+    write_promoted_memory(workspace.path())?;
+
+    let mut think = codex_command(codex_home.path())?;
+    think
+        .args([
+            "clearloop",
+            "think",
+            "--id",
+            "tp-memory",
+            "--task",
+            "server readiness notification failed",
+            "-C",
+        ])
+        .arg(workspace.path())
+        .assert()
+        .success()
+        .stdout(contains("Retrieved memories: 1"));
+
+    let mut execute = codex_command(codex_home.path())?;
+    execute
+        .args([
+            "clearloop",
+            "execute",
+            "--id",
+            "run-memory",
+            "--thinking-program",
+            "tp-memory",
+            "--task",
+            "server readiness notification failed",
+            "--codex-bin",
+        ])
+        .arg(&fake_codex)
+        .args(["-C"])
+        .arg(workspace.path())
+        .assert()
+        .success()
+        .stdout(contains("Execution prompt:"))
+        .stdout(contains("Events ingested: 4"));
+
+    let run_dir = workspace.path().join(".bestqa/agent-runs/run-memory");
+    let prompt = fs::read_to_string(run_dir.join("execution-prompt.md"))?;
+    assert!(prompt.contains("## Retrieved promoted memory"));
+    assert!(prompt.contains("experience_id: exp-demo"));
+    assert!(prompt.contains("Server readiness depends on an observable ready notification."));
+    assert!(prompt.contains("Treat retrieved memories as prior verified evidence"));
+    assert!(
+        fs::read_to_string(run_dir.join("explicit-reasoning.jsonl"))?
+            .contains("retrieved_memory_count\":1")
     );
 
     Ok(())

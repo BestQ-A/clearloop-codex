@@ -9,6 +9,7 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 pub const CHANGES_FILE: &str = "changes.json";
 pub const VERIFICATION_FILE: &str = "verification.md";
 pub const RESULT_FILE: &str = "result.md";
+pub const EXECUTION_PROMPT_FILE: &str = "execution-prompt.md";
 pub const CODEX_EXEC_EVENTS_FILE: &str = "codex-exec-events.jsonl";
 pub const EVIDENCE_STREAM: &str = "evidence.jsonl";
 pub const COMMAND_STREAM: &str = "commands.jsonl";

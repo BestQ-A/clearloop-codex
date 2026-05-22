@@ -37,6 +37,7 @@ use codex_clearloop_core::map_codex_exec_event_with_source;
 
 use crate::clearloop_memory::PromoteArgs;
 use crate::clearloop_memory::ReviewArgs;
+use crate::clearloop_prompt::build_execution_prompt;
 use crate::clearloop_retrieve::RetrieveArgs;
 use crate::clearloop_retrieve::write_promoted_memory_retrieval;
 use crate::clearloop_verify::VerifyArgs;
@@ -472,6 +473,14 @@ fn run_execute(args: ExecuteArgs) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| generated_id("run", args.task.as_str()));
     let reasoning_mode = ReasoningMode::from(args.reasoning_mode);
+    let thinking_program = match args.thinking_program.as_ref() {
+        Some(id) => Some(
+            store
+                .load_thinking_program(id)
+                .with_context(|| format!("failed to load thinking program {id}"))?,
+        ),
+        None => None,
+    };
 
     let mut manifest = RunManifest {
         run_id,
@@ -496,7 +505,36 @@ fn run_execute(args: ExecuteArgs) -> anyhow::Result<()> {
         )
         .context("failed to append controlled run start event")?;
 
-    let output = run_codex_exec(&args, &workspace_root)?;
+    let execution_prompt = build_execution_prompt(&args.task, thinking_program.as_ref());
+    let execution_prompt_path = store
+        .write_run_execution_prompt(&manifest.run_id, &execution_prompt)
+        .context("failed to write execution prompt")?;
+    let mut prompt_record = StreamRecord::new(
+        "clearloop-cli",
+        "Execution prompt prepared from explicit thinking program.",
+    );
+    prompt_record.payload = serde_json::json!({
+        "prompt_ref": execution_prompt_path.display().to_string(),
+        "thinking_program_ref": args.thinking_program.as_deref(),
+        "retrieved_memory_count": thinking_program
+            .as_ref()
+            .map(|program| program.retrieved_memories.len())
+            .unwrap_or(0),
+    });
+    store
+        .append_event(
+            &manifest.run_id,
+            &LedgerEvent::ExplicitReasoning(prompt_record),
+        )
+        .context("failed to append execution prompt event")?;
+
+    let execution_prompt_arg = execution_prompt
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let output = run_codex_exec(&args, &workspace_root, execution_prompt_arg.as_str())?;
     let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
     let raw_events_path = store
         .write_codex_exec_events(&manifest.run_id, &stdout_text)
@@ -544,6 +582,7 @@ fn run_execute(args: ExecuteArgs) -> anyhow::Result<()> {
     let report = report_result?;
 
     println!("Controlled run ledger: {}", run_dir.display());
+    println!("Execution prompt: {}", execution_prompt_path.display());
     println!("Raw Codex events: {}", raw_events_path.display());
     println!("Events ingested: {}", report.events_ingested);
     println!(
@@ -667,7 +706,11 @@ fn ingest_codex_exec_jsonl_reader<R: BufRead>(
     Ok(report)
 }
 
-fn run_codex_exec(args: &ExecuteArgs, workspace_root: &Path) -> anyhow::Result<Output> {
+fn run_codex_exec(
+    args: &ExecuteArgs,
+    workspace_root: &Path,
+    prompt: &str,
+) -> anyhow::Result<Output> {
     let codex_bin = match args.codex_bin.as_ref() {
         Some(path) => path.clone(),
         None => env::current_exe().context("failed to resolve current Codex executable")?,
@@ -689,7 +732,7 @@ fn run_codex_exec(args: &ExecuteArgs, workspace_root: &Path) -> anyhow::Result<O
     for exec_arg in &args.exec_args {
         command.arg(exec_arg);
     }
-    command.arg(&args.task);
+    command.arg(prompt);
 
     command
         .output()

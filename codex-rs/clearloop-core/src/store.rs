@@ -8,6 +8,7 @@ use crate::ledger::CODEX_EXEC_EVENTS_FILE;
 use crate::ledger::COMMAND_STREAM;
 use crate::ledger::DECISION_STREAM;
 use crate::ledger::EVIDENCE_STREAM;
+use crate::ledger::EXECUTION_PROMPT_FILE;
 use crate::ledger::EXPLICIT_REASONING_STREAM;
 use crate::ledger::LedgerEvent;
 use crate::ledger::MANIFEST_FILE;
@@ -161,6 +162,10 @@ impl ClearLoopStore {
             &run_dir.join(RESULT_FILE),
             "# Result\n\nNo result recorded yet.\n",
         )?;
+        write_text(
+            &run_dir.join(EXECUTION_PROMPT_FILE),
+            "# Execution Prompt\n\nNo execution prompt recorded yet.\n",
+        )?;
         write_text(&run_dir.join(CODEX_EXEC_EVENTS_FILE), "")?;
 
         for stream in [
@@ -195,6 +200,12 @@ impl ClearLoopStore {
 
     pub fn write_run_result(&self, run_id: &str, markdown: &str) -> Result<PathBuf> {
         let path = self.run_dir(run_id)?.join(RESULT_FILE);
+        write_text(&path, markdown)?;
+        Ok(path)
+    }
+
+    pub fn write_run_execution_prompt(&self, run_id: &str, markdown: &str) -> Result<PathBuf> {
+        let path = self.run_dir(run_id)?.join(EXECUTION_PROMPT_FILE);
         write_text(&path, markdown)?;
         Ok(path)
     }
